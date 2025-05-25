@@ -1,0 +1,427 @@
+﻿# 宸ュ叿鍑芥暟鏂囦欢锛氭彁渚涘悇绉嶈緟鍔╁姛鑳斤紝鍖呮嫭鑷畾涔夋崯澶卞嚱鏁?FocalLoss)銆佹ā鍨嬩繚瀛樹笌鍔犺浇銆佹€ц兘鎸囨爣璁＄畻銆佹暟鎹彲瑙嗗寲浠ュ強鏁版嵁闆嗕笅杞戒笌鐢熸垚宸ュ叿
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix
+import os
+import gdown
+import tarfile
+import torch.nn as nn
+
+class FocalLoss(nn.Module):
+    """
+    Focal Loss瀹炵幇锛岄拡瀵圭被鍒笉骞宠　闂
+    
+    FL(pt) = -alpha_t * (1 - pt)^gamma * log(pt)
+    
+    鍏朵腑:
+    - pt: 妯″瀷瀵圭湡瀹炵被鍒殑棰勬祴姒傜巼
+    - gamma: 鑱氱劍鍙傛暟锛屽澶ф椂鏇村叧娉ㄥ洶闅炬牱鏈紙闅句互姝ｇ‘鍒嗙被鐨勬牱鏈級
+    - alpha: 绫诲埆鏉冮噸鍙傛暟锛屽舰鐘朵负[num_classes]锛屼负灏戞暟绫昏祴浜堟洿楂樻潈閲?    """
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+        """
+        鍒濆鍖朏ocal Loss
+        
+        鍙傛暟:
+            alpha: 绫诲埆鏉冮噸锛屽舰鐘朵负[num_classes]锛孨one琛ㄧず绛夋潈閲?            gamma: 鑱氱劍鍙傛暟锛屽ぇ浜?锛岄粯璁や负2锛屽€艰秺澶у闅惧垎绫绘牱鏈叧娉ㄨ秺澶?            reduction: 鎹熷け璁＄畻鏂瑰紡锛?none', 'mean', 'sum'
+        """
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha  # 绫诲埆鏉冮噸锛屽舰鐘朵负[num_classes]
+        self.gamma = gamma  # 鑱氱劍鍙傛暟
+        self.reduction = reduction  # 鎹熷け璁＄畻鏂瑰紡
+        
+    def forward(self, inputs, targets):
+        """
+        鍓嶅悜浼犳挱璁＄畻鎹熷け
+        
+        鍙傛暟:
+            inputs: 妯″瀷杈撳嚭鐨刲ogits锛屽舰鐘朵负 [N, C]
+            targets: 鐪熷疄鏍囩锛屽舰鐘朵负 [N]
+            
+        杩斿洖:
+            loss: 璁＄畻鐨勬崯澶卞€?        """
+        # 妫€鏌ヨ緭鍏ョ淮搴︼紝濡傛灉inputs鏄痆N, C]鑰宼argets鏄痆N]锛屽垯杩涜one-hot缂栫爜
+        if len(inputs.shape) != len(targets.shape) and inputs.size(0) == targets.size(0):
+            if len(inputs.shape) == 2:  # 濡傛灉鏄垎绫婚棶棰?[batch_size, num_classes]
+                # 浣跨敤浜ゅ弶鐔垫崯澶憋紝閫傚悎鍒嗙被闂
+                ce_loss = nn.CrossEntropyLoss(weight=self.alpha, reduction='none')(inputs, targets)
+                pt = torch.exp(-ce_loss)
+                focal_weight = (1 - pt) ** self.gamma
+                loss = focal_weight * ce_loss
+            elif len(inputs.shape) == 1 or (len(inputs.shape) == 2 and inputs.size(1) == 1):  
+                # 濡傛灉鏄洖褰掗棶棰?[batch_size] 鎴?[batch_size, 1]
+                # 纭繚缁村害鍖归厤
+                inputs = inputs.view(-1)
+                targets = targets.view(-1)
+                # 浣跨敤MSE鎹熷け锛岄€傚悎鍥炲綊闂
+                mse_loss = nn.MSELoss(reduction='none')(inputs, targets)
+                pt = torch.exp(-mse_loss)
+                focal_weight = (1 - pt) ** self.gamma
+                loss = focal_weight * mse_loss
+        else:
+            # 濡傛灉缁村害宸茬粡鍖归厤锛岀洿鎺ヨ绠桞CE鎹熷け
+            bce_loss = nn.BCEWithLogitsLoss(reduction='none', pos_weight=self.alpha)(inputs, targets)
+            probs = torch.sigmoid(inputs)
+            p_t = probs * targets + (1 - probs) * (1 - targets)
+            focal_weight = (1 - p_t) ** self.gamma
+            loss = focal_weight * bce_loss
+        
+        # 鏍规嵁reduction鏂瑰紡澶勭悊鎹熷け
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:  # 'none'
+            return loss
+
+def save_checkpoint(model, optimizer, epoch, save_path):
+    """
+    淇濆瓨妯″瀷妫€鏌ョ偣锛岀敤浜庢仮澶嶈缁冩垨鍚庣画浣跨敤
+    
+    鍙傛暟:
+        model: 妯″瀷瀹炰緥
+        optimizer: 浼樺寲鍣ㄥ疄渚?        epoch: 褰撳墠璁粌杞
+        save_path: 淇濆瓨璺緞锛屽缓璁娇鐢?pth鍚庣紑
+    """
+    # 纭繚淇濆瓨鐩綍瀛樺湪
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    
+    # 淇濆瓨妯″瀷鍜屼紭鍖栧櫒鐘舵€?    torch.save({
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+    }, save_path)
+    
+    print(f"妯″瀷宸蹭繚瀛樺埌 {save_path}")
+
+def load_checkpoint(model, optimizer, load_path):
+    """
+    鍔犺浇妯″瀷妫€鏌ョ偣锛屾仮澶嶈缁冪姸鎬?    
+    鍙傛暟:
+        model: 妯″瀷瀹炰緥
+        optimizer: 浼樺寲鍣ㄥ疄渚?        load_path: 鍔犺浇璺緞
+        
+    杩斿洖:
+        int: 宸茶缁冪殑杞
+    """
+    # 妫€鏌ユ鏌ョ偣鏄惁瀛樺湪
+    if not os.path.exists(load_path):
+        print(f"妫€鏌ョ偣 {load_path} 涓嶅瓨鍦?)
+        return 0
+    
+    # 鍔犺浇妫€鏌ョ偣
+    checkpoint = torch.load(load_path)
+    
+    # 鎭㈠妯″瀷鍜屼紭鍖栧櫒鐘舵€?    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    
+    # 鑾峰彇宸茶缁冪殑杞
+    epoch = checkpoint['epoch']
+    print(f"浠庤疆娆?{epoch} 鍔犺浇妯″瀷")
+    
+    return epoch
+
+def find_best_threshold(y_true, y_pred_probs, thresholds=None):
+    """
+    鎼滅储鏈€浣冲垎绫婚槇鍊硷紝浣縁1鍒嗘暟鏈€澶у寲
+    鐢ㄤ簬浜屽垎绫绘垨澶氭爣绛惧垎绫诲満鏅?    
+    鍙傛暟:
+        y_true: 鐪熷疄鏍囩 [N, C]
+        y_pred_probs: sigmoid鍚庣殑棰勬祴姒傜巼 [N, C]
+        thresholds: 寰呰瘎浼扮殑闃堝€煎垪琛紝榛樿鍦?.1-0.9涔嬮棿鎼滅储
+        
+    杩斿洖:
+        best_threshold: 鏈€浣抽槇鍊?        best_f1: 鏈€浣矲1鍊?        threshold_results: 涓嶅悓闃堝€肩殑璇勪及缁撴灉瀛楀吀鍒楄〃
+    """
+    # 璁剧疆榛樿闃堝€艰寖鍥?    if thresholds is None:
+        thresholds = np.arange(0.1, 0.91, 0.1)
+    
+    best_f1 = 0
+    best_threshold = 0.5  # 榛樿闃堝€?    threshold_results = []
+    
+    # 杞崲涓簄umpy鏁扮粍杩涜璁＄畻
+    y_true_np = y_true.cpu().numpy()
+    y_pred_probs_np = y_pred_probs.cpu().numpy()
+    
+    # 灏濊瘯涓嶅悓闃堝€?    for threshold in thresholds:
+        # 搴旂敤闃堝€艰幏寰椾簩鍒嗙被缁撴灉
+        y_pred_binary = (y_pred_probs_np > threshold).astype(np.float32)
+        
+        # 璁＄畻璇勪及鎸囨爣
+        f1 = f1_score(y_true_np, y_pred_binary, average='macro', zero_division=0)
+        precision = precision_score(y_true_np, y_pred_binary, average='macro', zero_division=0)
+        recall = recall_score(y_true_np, y_pred_binary, average='macro', zero_division=0)
+        
+        # 淇濆瓨褰撳墠闃堝€肩殑缁撴灉
+        threshold_results.append({
+            'threshold': threshold,
+            'f1': f1,
+            'precision': precision,
+            'recall': recall
+        })
+        
+        # 鏇存柊鏈€浣抽槇鍊?        if f1 > best_f1:
+            best_f1 = f1
+            best_threshold = threshold
+    
+    return best_threshold, best_f1, threshold_results
+
+def calculate_class_weights(y_true):
+    """
+    鏍规嵁鏍囩棰戠巼璁＄畻绫诲埆鏉冮噸锛岀敤浜庡鐞嗙被鍒笉骞宠　
+    
+    鍙傛暟:
+        y_true: 鐪熷疄鏍囩 [N, C] 鎴?[N]
+        
+    杩斿洖:
+        class_weights: 绫诲埆鏉冮噸锛屽舰鐘朵负 [C]锛屽弽姣斾簬绫诲埆棰戠巼
+    """
+    # 璁＄畻姣忎釜绫诲埆鐨勬鏍锋湰鏁伴噺
+    positive_counts = y_true.sum(axis=0)
+    total_samples = len(y_true)
+    
+    # 閬垮厤闄ら浂閿欒
+    positive_counts = np.maximum(positive_counts, 1)
+    
+    # 璁＄畻绫诲埆鏉冮噸锛氬弽姣斾簬棰戠巼
+    # 瀵逛簬绋€鏈夌被鍒紝缁欎簣鏇撮珮鐨勬潈閲?    class_weights = total_samples / (positive_counts * len(positive_counts))
+    
+    return class_weights
+
+def calculate_metrics(y_true, y_pred, threshold=0.3, search_threshold=True):
+    """
+    璁＄畻澶氭爣绛惧垎绫绘寚鏍囷紝鍏ㄩ潰璇勪及妯″瀷鎬ц兘
+    
+    鍙傛暟:
+        y_true: 鐪熷疄鏍囩 [N, C]
+        y_pred: 棰勬祴鍒嗘暟锛坙ogits锛?[N, C]
+        threshold: 浜屽垎绫婚槇鍊硷紝闄嶄綆鑷?.3浠ユ洿瀹规槗棰勬祴姝ｆ牱鏈?        search_threshold: 鏄惁鎼滅储鏈€浣抽槇鍊?        
+    杩斿洖:
+        dict: 鍖呭惈鍚勭鎬ц兘鎸囨爣鐨勫瓧鍏?    """
+    # 瀵归娴嬪垎鏁拌繘琛宻igmoid婵€娲伙紝纭繚鑼冨洿鍦╗0,1]涔嬮棿
+    y_pred_probs = torch.sigmoid(y_pred).cpu().numpy()
+    y_true_np = y_true.cpu().numpy()
+    
+    # 璁＄畻绫诲埆鏉冮噸锛岀敤浜庡悗缁缁冧紭鍖?    class_weights = calculate_class_weights(y_true_np)
+    
+    if search_threshold:
+        # 鎼滅储鏈€浣抽槇鍊?        best_threshold, _, threshold_results = find_best_threshold(
+            y_true, torch.sigmoid(y_pred),
+            thresholds=np.arange(0.1, 0.91, 0.1)
+        )
+        # 浣跨敤鏈€浣抽槇鍊艰繘琛岄娴?        y_pred_binary = (y_pred_probs > best_threshold).astype(np.float32)
+        used_threshold = best_threshold
+    else:
+        # 浣跨敤鍥哄畾闃堝€?        y_pred_binary = (y_pred_probs > threshold).astype(np.float32)
+        used_threshold = threshold
+    
+    # 璁＄畻鍚勭鎸囨爣
+    f1_macro = f1_score(y_true_np, y_pred_binary, average='macro', zero_division=0)
+    precision_macro = precision_score(y_true_np, y_pred_binary, average='macro', zero_division=0)
+    recall_macro = recall_score(y_true_np, y_pred_binary, average='macro', zero_division=0)
+    
+    # 鏍锋湰绾у埆鐨凢1
+    f1_samples = f1_score(y_true_np, y_pred_binary, average='samples', zero_division=0)
+    
+    # 缁熻鏍囩鍒嗗竷淇℃伅
+    positive_counts = y_true_np.sum(axis=0)
+    total_samples = len(y_true_np)
+    label_frequencies = positive_counts / total_samples
+    
+    # 闅忔満鎵撳嵃鏍囩鍒嗗竷
+    if np.random.random() < 0.1:  # 鍙湪10%鐨勮瘎浼颁腑鎵撳嵃锛岄伩鍏嶆棩蹇楄繃澶?        print("\n鏍囩鍒嗗竷鎯呭喌:")
+        for i, freq in enumerate(label_frequencies):
+            print(f"鏍囩 {i}: {freq:.4f} ({int(positive_counts[i])}/{total_samples})")
+    
+    return {
+        'f1_macro': f1_macro,
+        'precision_macro': precision_macro,
+        'recall_macro': recall_macro,
+        'f1_samples': f1_samples,
+        'threshold': used_threshold,
+        'label_frequencies': label_frequencies.tolist(),
+        'class_weights': class_weights.tolist()
+    }
+
+def plot_metrics(train_metrics, val_metrics, save_path=None):
+    """
+    缁樺埗璁粌杩囩▼涓殑鎸囨爣鍙樺寲鏇茬嚎锛屽彲瑙嗗寲璁粌杩涘睍
+    
+    鍙傛暟:
+        train_metrics: 璁粌鎸囨爣鍘嗗彶璁板綍瀛楀吀
+        val_metrics: 楠岃瘉鎸囨爣鍘嗗彶璁板綍瀛楀吀
+        save_path: 鍥惧儚淇濆瓨璺緞
+    """
+    metrics = ['loss', 'f1_macro', 'precision_macro', 'recall_macro']
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    axes = axes.flatten()
+    
+    # 閬嶅巻姣忎釜鎸囨爣锛岀粯鍒跺搴旀洸绾?    for i, metric in enumerate(metrics):
+        ax = axes[i]
+        if metric in train_metrics:
+            ax.plot(train_metrics[metric], label=f'璁粌 {metric}')
+        if metric in val_metrics:
+            ax.plot(val_metrics[metric], label=f'楠岃瘉 {metric}')
+        ax.set_xlabel('杞')
+        ax.set_ylabel(metric)
+        ax.set_title(f'{metric} 鍙樺寲鏇茬嚎')
+        ax.legend()
+    
+    # 璋冩暣甯冨眬骞朵繚瀛?    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path)
+    plt.close()
+
+def download_bigearthnet_mini(output_dir='bigearthnet'):
+    """
+    涓嬭浇骞惰В鍘婤igEarthNet-Mini鏁版嵁闆?    
+    鍙傛暟:
+        output_dir: 杈撳嚭鐩綍
+    
+    杩斿洖:
+        str: 鏁版嵁闆嗚矾寰?    """
+    # 鍒涘缓杈撳嚭鐩綍
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # BigEarthNet-Mini鐨凣oogle Drive ID
+    file_id = '1A9wN21biA9IbRH5s_oCRdnFrWO-Mc4_Y'
+    
+    # 涓嬭浇璺緞
+    output_path = os.path.join(output_dir, 'bigearthnet-mini.tar.gz')
+    
+    # 涓嬭浇鏂囦欢
+    if not os.path.exists(output_path):
+        print(f"姝ｅ湪涓嬭浇BigEarthNet-Mini鏁版嵁闆?..")
+        gdown.download(f'https://drive.google.com/uc?id={file_id}', output_path, quiet=False)
+    
+    # 瑙ｅ帇鏂囦欢
+    extract_path = os.path.join(output_dir, 'Mini Data')
+    if not os.path.exists(extract_path):
+        print(f"姝ｅ湪瑙ｅ帇鏁版嵁闆?..")
+        with tarfile.open(output_path) as tar:
+            tar.extractall(path=output_dir)
+    
+    print(f"鏁版嵁闆嗗凡鍑嗗瀹屾垚: {extract_path}")
+    return extract_path
+
+def generate_mock_data(directory, num_samples=100):
+    """
+    鐢熸垚妯℃嫙鏁版嵁锛岀敤浜庢祴璇曞拰寮€鍙?    
+    鍙傛暟:
+        directory: 鐩爣鐩綍
+        num_samples: 鐢熸垚鐨勬牱鏈暟閲?    """
+    # 鍒涘缓鐩綍
+    os.makedirs(directory, exist_ok=True)
+    
+    # 浣嶇疆鏍囩
+    positions = ['l', 'm', 't']
+    
+    # 涓烘瘡涓綅缃垱寤虹洰褰?    for pos in positions:
+        pos_dir = os.path.join(directory, f'mini_14{pos}')
+        json_dir = os.path.join(directory, f'mini_14{pos}_json')
+        
+        os.makedirs(pos_dir, exist_ok=True)
+        os.makedirs(json_dir, exist_ok=True)
+        
+        # 姣忎釜浣嶇疆鐢熸垚鏍锋湰
+        for i in range(num_samples // 3):
+            # 鍒涘缓闅忔満TIF鏂囦欢
+            tif_path = os.path.join(pos_dir, f'{pos}_sample_{i}.tif')
+            # 鐢熸垚闅忔満鍥惧儚鏁版嵁
+            img_data = np.random.rand(3, 128, 128).astype(np.float32)
+            
+            # 淇濆瓨涓簄umpy鏂囦欢锛屾ā鎷烼IF
+            np.save(tif_path.replace('.tif', '.npy'), img_data)
+            
+            # 鍒涘缓闅忔満JSON鏍囨敞
+            json_path = os.path.join(json_dir, f'{pos}_sample_{i}.json')
+            
+            # 闅忔満鍐冲畾鏄惁涓哄仴搴锋牱鏈?            is_healthy = np.random.random() > 0.7
+            
+            # 鍒涘缓JSON鍐呭
+            if is_healthy:
+                label = 'health'
+                grade = 0
+            else:
+                # 闅忔満鐤剧梾绛夌骇 (0, 3, 5, 7, 9)
+                grade = np.random.choice([3, 5, 7, 9])
+                label = f'disease_{grade}'
+            
+            # 鏋勫缓JSON缁撴瀯
+            json_data = {
+                'imagePath': f'{pos}_sample_{i}.tif',
+                'imageHeight': 128,
+                'imageWidth': 128,
+                'shapes': [
+                    {
+                        'label': label,
+                        'points': [[20, 20], [100, 100]],
+                        'shape_type': 'rectangle'
+                    }
+                ]
+            }
+            
+            # 淇濆瓨JSON鏂囦欢
+            with open(json_path, 'w') as f:
+                import json
+                json.dump(json_data, f)
+    
+    print(f"宸茬敓鎴?{num_samples} 涓ā鎷熸牱鏈埌鐩綍: {directory}")
+
+def visualize_attention(image, attention_map, save_path=None):
+    """
+    鍙鍖栨敞鎰忓姏鍥撅紝甯姪鐞嗚В妯″瀷鍏虫敞鍖哄煙
+    
+    鍙傛暟:
+        image: 杈撳叆鍥惧儚锛屽舰鐘朵负[3, H, W]
+        attention_map: 娉ㄦ剰鍔涘浘锛屽舰鐘朵负[H, W]
+        save_path: 淇濆瓨璺緞
+    """
+    # 杞崲鍥惧儚涓簄umpy骞惰皟鏁翠负姝ｇ‘鐨勯『搴?[H, W, C]
+    if torch.is_tensor(image):
+        image = image.cpu().numpy()
+    
+    if image.shape[0] == 3:  # [C, H, W] -> [H, W, C]
+        image = np.transpose(image, (1, 2, 0))
+    
+    # 纭繚鍊煎湪[0,1]鑼冨洿鍐?    image = np.clip(image, 0, 1)
+    
+    # 杞崲娉ㄦ剰鍔涘浘涓簄umpy
+    if torch.is_tensor(attention_map):
+        attention_map = attention_map.cpu().numpy()
+    
+    # 鍘嬬缉涓?D
+    if len(attention_map.shape) > 2:
+        attention_map = attention_map.squeeze()
+    
+    # 缁樺埗鍘熷鍥惧儚鍜屾敞鎰忓姏鐑浘
+    plt.figure(figsize=(10, 5))
+    
+    # 鍘熷鍥惧儚
+    plt.subplot(1, 2, 1)
+    plt.imshow(image)
+    plt.title('鍘熷鍥惧儚')
+    plt.axis('off')
+    
+    # 娉ㄦ剰鍔涚儹鍥?    plt.subplot(1, 2, 2)
+    plt.imshow(image)
+    plt.imshow(attention_map, alpha=0.5, cmap='jet')
+    plt.title('娉ㄦ剰鍔涚儹鍥?)
+    plt.axis('off')
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path)
+    plt.close()
+
+def count_parameters(model):
+    """
+    缁熻妯″瀷鍙傛暟閲?    
+    鍙傛暟:
+        model: PyTorch妯″瀷
+        
+    杩斿洖:
+        int: 鍙傛暟鎬绘暟
+    """
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
